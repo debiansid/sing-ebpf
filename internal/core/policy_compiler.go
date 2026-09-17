@@ -28,6 +28,8 @@ type CompiledPolicy struct {
 	sharedBypassPortEntries []tcPortKey
 	localInitialBypass      dualStackCIDRPrefixes
 	sharedInitialBypass     dualStackCIDRPrefixes
+	endpoint                dualStackCIDRPrefixes
+	endpointPortEntries     []tcPortKey
 }
 
 // CompileActionPolicy translates the caller's final pass/intercept rules into
@@ -47,6 +49,10 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 		return CompiledPolicy{}, err
 	}
 	shared, sharedBypass, sharedForceIPv4, sharedForceIPv6, err := compileActionScope(config.Shared, "shared")
+	if err != nil {
+		return CompiledPolicy{}, err
+	}
+	endpoint, endpointPorts, err := compileEndpointPolicy(config)
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
@@ -80,7 +86,40 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 		sharedInitialBypass:     sharedBypass,
 		sharedDNSMode:           actionDNSMode(config.Shared),
 		sharedBypassPrivate:     false,
+		endpoint:                endpoint,
+		endpointPortEntries:     endpointPorts,
 	}, nil
+}
+
+func compileEndpointPolicy(config ActionPolicy) (dualStackCIDRPrefixes, []tcPortKey, error) {
+	if len(config.EndpointCIDR) == 0 && len(config.EndpointPort) == 0 {
+		return dualStackCIDRPrefixes{}, nil, nil
+	}
+	if len(config.EndpointCIDR) == 0 || len(config.EndpointPort) == 0 {
+		return dualStackCIDRPrefixes{}, nil, E.New("TC eBPF endpoint policy requires CIDR and port decisions")
+	}
+	endpoint, err := compileDestinationPassDecisions(config.EndpointCIDR)
+	if err != nil {
+		return dualStackCIDRPrefixes{}, nil, E.Cause(err, "compile TC eBPF endpoint CIDR policy")
+	}
+	if len(endpoint.ipv4) > maxDestinationCIDRPolicyEntries || len(endpoint.ipv6) > maxDestinationCIDRPolicyEntries {
+		return dualStackCIDRPrefixes{}, nil, E.New("TC eBPF endpoint CIDR policy exceeds map capacity")
+	}
+	if len(config.EndpointPort) > tcPortPolicyCapacity {
+		return dualStackCIDRPrefixes{}, nil, E.New("TC eBPF endpoint port policy exceeds map capacity")
+	}
+	ports := make([]tcPortKey, 0, len(config.EndpointPort))
+	for _, decision := range config.EndpointPort {
+		if decision.Port == 0 || decision.Action != DecisionPass ||
+			(decision.Protocol != ProtocolTCP && decision.Protocol != ProtocolUDP) {
+			return dualStackCIDRPrefixes{}, nil, E.New("invalid TC eBPF endpoint port decision")
+		}
+		if decision.Protocol == ProtocolTCP && !config.EnableTCP || decision.Protocol == ProtocolUDP && !config.EnableUDP {
+			return dualStackCIDRPrefixes{}, nil, E.New("TC eBPF endpoint port decision uses a disabled protocol")
+		}
+		ports = append(ports, tcPortKey{Protocol: decision.Protocol, Port: decision.Port})
+	}
+	return endpoint, ports, nil
 }
 
 type compiledActionScope struct {

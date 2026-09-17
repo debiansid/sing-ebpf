@@ -180,6 +180,32 @@ func TestCompileActionPolicySnapshot(t *testing.T) {
 	}
 }
 
+func TestCompileEndpointActionPolicy(t *testing.T) {
+	policy, err := CompileActionPolicy(ActionPolicy{
+		EnableTCP:    true,
+		Local:        ActionScope{Default: DecisionIntercept},
+		Shared:       ActionScope{Default: DecisionIntercept},
+		EndpointCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("203.0.113.1/24"), Action: DecisionPass}},
+		EndpointPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.endpoint.ipv4) != 1 || policy.endpoint.ipv4[0] != netip.MustParsePrefix("203.0.113.0/24") ||
+		len(policy.endpointPortEntries) != 1 {
+		t.Fatalf("compiled policy omitted endpoint rules: %+v", policy)
+	}
+	for _, config := range []ActionPolicy{
+		{EnableTCP: true, EndpointCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Action: DecisionPass}}},
+		{EnableTCP: true, EndpointPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}}},
+		{EnableTCP: true, EndpointCIDR: []CIDRDecision{{Prefix: netip.MustParsePrefix("203.0.113.0/24"), Action: DecisionIntercept}}, EndpointPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}}},
+	} {
+		if _, err := CompileActionPolicy(config); err == nil {
+			t.Fatalf("invalid endpoint action policy was accepted: %+v", config)
+		}
+	}
+}
+
 func TestDestinationCIDRPolicyDelta(t *testing.T) {
 	current := []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
