@@ -280,6 +280,16 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 	return core.UnwrapTCBackend(b).SetRoutingMark(mark)
 }
 
+// SetEndpointVPNReady permits native bypass for matching local endpoint traffic
+// while ready and forces interception while not ready.
+func (b *TCBackend) SetEndpointVPNReady(ready bool) error {
+	backend := core.UnwrapTCBackend(b)
+	if backend == nil {
+		return errors.New("uninitialized TC eBPF backend")
+	}
+	return backend.SetEndpointVPNReady(ready)
+}
+
 func (b *TCBackend) Enable() error { return core.UnwrapTCBackend(b).Enable() }
 func (b *TCBackend) Disable() error {
 	backend := core.UnwrapTCBackend(b)

@@ -53,6 +53,40 @@ func TestTCIPv6PathFlags(t *testing.T) {
 	}
 }
 
+func TestTCEndpointFlags(t *testing.T) {
+	policy := CompiledPolicy{
+		endpoint:            dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}},
+		endpointPortEntries: []tcPortKey{{Protocol: ProtocolTCP, Port: 4500}},
+	}
+	flags := tcFlags(TCConfig{EnableLocal: true}, policy)
+	if flags&tcFlagEndpointEnabled == 0 || flags&tcFlagEndpointReady != 0 {
+		t.Fatalf("unexpected endpoint flags: %#x", flags)
+	}
+	const existingTCFlagNamespace = 1<<24 - 1
+	if tcFlagEndpointEnabled&existingTCFlagNamespace != 0 ||
+		tcFlagEndpointReady&(existingTCFlagNamespace|tcFlagEndpointEnabled) != 0 {
+		t.Fatal("endpoint flag collides with the TC flag namespace")
+	}
+	ready := endpointReadyFlags(flags, true)
+	if ready&tcFlagEndpointReady == 0 || endpointReadyFlags(ready, false) != flags {
+		t.Fatalf("endpoint READY transition failed: %#x", ready)
+	}
+	if tcFlags(TCConfig{EnableShared: true}, policy)&tcFlagEndpointEnabled != 0 {
+		t.Fatal("shared-only backend enabled endpoint policy")
+	}
+}
+
+func TestEndpointReadyControlFailure(t *testing.T) {
+	b := &TCBackend{runtime: &tcRuntime{}, controlMapFD: -1}
+	b.control.Flags = tcFlagEndpointEnabled | tcFlagTCP
+	if err := b.SetEndpointVPNReady(false); err != nil {
+		t.Fatalf("unchanged state wrote the control map: %v", err)
+	}
+	if err := b.SetEndpointVPNReady(true); err == nil || b.control.Flags != tcFlagEndpointEnabled|tcFlagTCP {
+		t.Fatal("failed control write committed READY")
+	}
+}
+
 func TestMakeTCAssignKey(t *testing.T) {
 	for _, test := range []struct {
 		source      string

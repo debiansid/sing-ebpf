@@ -66,6 +66,8 @@ const (
 	tcFlagSharedBypassPort = 1 << 21
 	tcFlagSharedBypassIPv4 = 1 << 22
 	tcFlagSharedBypassIPv6 = 1 << 23
+	tcFlagEndpointEnabled  = 1 << 24
+	tcFlagEndpointReady    = 1 << 25
 )
 
 const (
@@ -207,8 +209,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	includeIPv4, includeIPv6 := policy.includeSource.ipv4, policy.includeSource.ipv6
 	excludeIPv4, excludeIPv6 := policy.excludeSource.ipv4, policy.excludeSource.ipv6
 	if err = checkLPMTriePolicyCompatibility(
-		"TC eBPF UID and source CIDR",
-		len(uidEntries)+len(includeIPv4)+len(includeIPv6)+len(excludeIPv4)+len(excludeIPv6),
+		"TC eBPF UID, source CIDR, and endpoint CIDR",
+		len(uidEntries)+len(includeIPv4)+len(includeIPv6)+len(excludeIPv4)+len(excludeIPv6)+
+			len(policy.endpoint.ipv4)+len(policy.endpoint.ipv6),
 	); err != nil {
 		return nil, err
 	}
@@ -233,6 +236,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_host_ipv6":           {name: "sb_tc_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_local_bypass_port":   {name: "sb_tc_lport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.localBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_shared_bypass_port":  {name: "sb_tc_sport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.sharedBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_ipv4":       {name: "sb_tc_endpoint4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv4)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_ipv6":       {name: "sb_tc_endpoint6", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv6)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_port":       {name: "sb_tc_endpointp", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.endpointPortEntries)), 1), flags: bpfFlagNoPrealloc},
 	}
 	if config.EnableLocal {
 		selfMapCapacity := uint32(selfBypassSocketCapacity)
@@ -286,6 +292,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if len(policy.sharedInitialBypass.ipv6) > 0 {
 		controlValue.Flags |= tcFlagSharedBypassIPv6
 	}
+	if config.EnableLocal && len(policy.endpointPortEntries) > 0 {
+		controlValue.Flags |= tcFlagEndpointEnabled
+	}
 	if forceInterceptIPv4.IsValid() {
 		controlValue.Flags |= 1 << 10
 		controlValue.ForceInterceptIPv4Prefix = forceInterceptIPv4.Addr().As4()
@@ -322,6 +331,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		LocalBypassIPv6:   maps["tc_local_bypass_ipv6"],
 		SharedBypassIPv4:  maps["tc_shared_bypass_ipv4"],
 		SharedBypassIPv6:  maps["tc_shared_bypass_ipv6"],
+		EndpointPort:      maps["tc_endpoint_port"],
+		EndpointIPv4:      maps["tc_endpoint_ipv4"],
+		EndpointIPv6:      maps["tc_endpoint_ipv6"],
 		IncludeSourceIPv4: maps["tc_include_source_ipv4"],
 		IncludeSourceIPv6: maps["tc_include_source_ipv6"],
 		ExcludeSourceIPv4: maps["tc_exclude_source_ipv4"],
@@ -441,7 +453,7 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 }
 
 func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
-	return policyVector{
+	flags := policyVector{
 		EnableTCP:           config.EnableTCP,
 		EnableUDP:           config.EnableUDP,
 		EnableIPv4:          config.EnableIPv4,
@@ -460,6 +472,40 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
 	}.tcFlags()
+	if config.EnableLocal && len(policy.endpointPortEntries) > 0 {
+		flags |= tcFlagEndpointEnabled
+	}
+	return flags
+}
+
+func endpointReadyFlags(flags uint32, ready bool) uint32 {
+	if ready {
+		return flags | tcFlagEndpointReady
+	}
+	return flags &^ tcFlagEndpointReady
+}
+
+// SetEndpointVPNReady changes only the endpoint gate. Matching local traffic
+// is intercepted until the endpoint is ready, then natively bypassed.
+func (b *TCBackend) SetEndpointVPNReady(ready bool) error {
+	b.access.Lock()
+	defer b.access.Unlock()
+	if err := b.requireUsableLocked(); err != nil {
+		return err
+	}
+	if b.control.Flags&tcFlagEndpointEnabled == 0 {
+		return nil
+	}
+	previous := b.control.Flags
+	b.control.Flags = endpointReadyFlags(previous, ready)
+	if b.control.Flags == previous {
+		return nil
+	}
+	if err := b.updateControlLocked(); err != nil {
+		b.control.Flags = previous
+		return err
+	}
+	return nil
 }
 
 func (b *TCBackend) requireUsableLocked() error {
