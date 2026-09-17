@@ -53,6 +53,51 @@ func TestTCIPv6PathFlags(t *testing.T) {
 	}
 }
 
+func TestTCEndpointFlags(t *testing.T) {
+	policy, err := CompilePolicy(PolicyConfig{
+		EnableTCP:       true,
+		EndpointEnabled: true,
+		EndpointCIDR:    []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")},
+		EndpointPort:    []PortRange{{Start: 4500, End: 4500}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := tcFlags(TCConfig{EnableLocal: true}, policy)
+	if flags&tcFlagEndpointEnabled == 0 || flags&tcFlagEndpointReady != 0 {
+		t.Fatalf("unexpected endpoint flags: %#x", flags)
+	}
+	ready := endpointReadyFlags(flags, true)
+	if ready&tcFlagEndpointReady == 0 || ready&tcFlagEndpointEnabled == 0 {
+		t.Fatalf("endpoint READY flag was not applied: %#x", ready)
+	}
+	notReady := endpointReadyFlags(ready, false)
+	if notReady != flags {
+		t.Fatalf("endpoint READY flag was not cleared: %#x != %#x", notReady, flags)
+	}
+	if count := tcLPMPolicyEntryCount(policy); count != 1 {
+		t.Fatalf("endpoint CIDR was omitted from TC LPM safety preflight: %d", count)
+	}
+	if tcFlags(TCConfig{EnableShared: true}, policy)&tcFlagEndpointEnabled != 0 {
+		t.Fatal("shared-only backend enabled endpoint policy")
+	}
+}
+
+func TestEndpointReadyControlFailure(t *testing.T) {
+	b := &TCBackend{runtime: &tcRuntime{}, controlMapFD: -1}
+	b.control.Flags = tcFlagEndpointEnabled | tcFlagTCP
+	if err := b.SetEndpointVPNReady(false); err != nil {
+		t.Fatalf("unchanged state wrote the control map: %v", err)
+	}
+	if err := b.SetEndpointVPNReady(true); err == nil || b.control.Flags != tcFlagEndpointEnabled|tcFlagTCP {
+		t.Fatal("failed control write committed READY")
+	}
+	b.runtime = nil
+	if err := b.SetEndpointVPNReady(true); err == nil {
+		t.Fatal("closed backend accepted READY")
+	}
+}
+
 func TestMakeTCAssignKey(t *testing.T) {
 	for _, test := range []struct {
 		source      string
