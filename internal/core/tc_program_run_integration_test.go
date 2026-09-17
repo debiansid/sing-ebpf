@@ -5,6 +5,7 @@ package core
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -196,6 +197,55 @@ func forceInterceptPolicyPrecedencePackets() map[string][]byte {
 		"IPv6": testIPv6TCPPacket(
 			netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("fd00:198:18::1"), 53001, 53, nil,
 		),
+	}
+}
+
+func TestTCEndpointReadyGateIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "verify TC endpoint READY gate")
+	endpoint := netip.MustParsePrefix("203.0.113.0/24")
+	policy, err := CompileActionPolicy(ActionPolicy{
+		EnableTCP: true,
+		Local: ActionScope{
+			Default:         DecisionIntercept,
+			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}},
+		},
+		Shared:       ActionScope{Default: DecisionIntercept},
+		EndpointCIDR: []CIDRDecision{{Prefix: endpoint, Action: DecisionPass}},
+		EndpointPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := PrepareTC(TCConfig{
+		ListenerPort: 65531, EnableLocal: true, EnableIPv4: true, EnableTCP: true,
+		DeliveryInterface: 1, Policy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if _, err = backend.UpdateLocalDestinationDecisions([]CIDRDecision{{Prefix: endpoint, Action: DecisionPass}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	program := backend.runtime.programs[tcProgramLocalEgressEthernet]
+	packet := testIPv4TCPPacket(netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("203.0.113.10"), 53000, 4500)
+	if action, _ := runTCProgram(t, program, packet); action != 7 {
+		t.Fatalf("NOT READY endpoint was bypassed by generic pass decisions: action=%d", action)
+	}
+	if err = backend.SetEndpointVPNReady(true); err != nil {
+		t.Fatal(err)
+	}
+	if action, _ := runTCProgram(t, program, packet); action != testTCActUnspec {
+		t.Fatalf("READY endpoint did not native-bypass: action=%d", action)
+	}
+	if err = backend.SetEndpointVPNReady(false); err != nil {
+		t.Fatal(err)
+	}
+	if action, _ := runTCProgram(t, program, packet); action != 7 {
+		t.Fatalf("disconnect did not restore endpoint interception: action=%d", action)
 	}
 }
 
@@ -391,5 +441,68 @@ func TestSharedPacketRewriteFragmentPolicyIntegration(t *testing.T) {
 		t.Fatal(err)
 	} else if passes != 2 {
 		t.Fatalf("egress fragment passes = %d, want 2", passes)
+	}
+}
+
+func TestTCEndpointDNSPrecedenceIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "verify DNS precedence over endpoint readiness")
+	for _, protocol := range []uint8{ProtocolTCP, ProtocolUDP} {
+		for _, mode := range []DNSMode{DNSModeHijack, DNSModeOff, DNSModeRespectPolicy} {
+			for _, force := range []bool{false, true} {
+				t.Run(fmt.Sprintf("protocol_%d/mode_%d/force_%t", protocol, mode, force), func(t *testing.T) {
+					prefix := netip.MustParsePrefix("203.0.113.0/24")
+					scope := ActionScope{Default: DecisionIntercept}
+					if mode != DNSModeRespectPolicy {
+						action := DecisionPass
+						if mode == DNSModeHijack {
+							action = DecisionIntercept
+						}
+						scope.DestinationPort = []PortDecision{{Protocol: protocol, Port: 53, Action: action}}
+					}
+					if force {
+						scope.DestinationCIDR = []CIDRDecision{{Prefix: prefix, Action: DecisionIntercept}}
+					}
+					policy, err := CompileActionPolicy(ActionPolicy{
+						EnableTCP: true, EnableUDP: true, Local: scope, Shared: ActionScope{Default: DecisionIntercept},
+						EndpointCIDR: []CIDRDecision{{Prefix: prefix, Action: DecisionPass}},
+						EndpointPort: []PortDecision{{Protocol: protocol, Port: 53, Action: DecisionPass}},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					backend, err := PrepareTC(TCConfig{ListenerPort: 65531, EnableLocal: true, EnableIPv4: true, EnableTCP: true, EnableUDP: true, DeliveryInterface: 1, Policy: policy})
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = backend.Close() })
+					if err = backend.Enable(); err != nil {
+						t.Fatal(err)
+					}
+					for _, ready := range []bool{false, true} {
+						if err = backend.SetEndpointVPNReady(ready); err != nil {
+							t.Fatal(err)
+						}
+						sourcePort := uint16(53000)
+						if ready {
+							sourcePort++
+						}
+						packet := testIPv4TCPPacket(netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("203.0.113.10"), sourcePort, 53)
+						if protocol == ProtocolUDP {
+							packet = packet[:14+20+8]
+							packet[14+9] = ProtocolUDP
+							binary.BigEndian.PutUint16(packet[14+2:14+4], 28)
+							binary.BigEndian.PutUint16(packet[14+20+4:14+20+6], 8)
+						}
+						want := testTCActUnspec
+						if force || mode == DNSModeHijack || mode == DNSModeRespectPolicy && !ready {
+							want = 7
+						}
+						if action, _ := runTCProgram(t, backend.runtime.programs[tcProgramLocalEgressEthernet], packet); action != want {
+							t.Fatalf("ready=%t: action=%d, want %d", ready, action, want)
+						}
+					}
+				})
+			}
+		}
 	}
 }

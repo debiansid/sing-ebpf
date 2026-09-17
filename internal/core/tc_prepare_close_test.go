@@ -74,6 +74,9 @@ func TestPrepareTCClosesRealMapsWhenAnExternalSelfMapDoesNotMatch(t *testing.T) 
 	if err != nil {
 		t.Skipf("cannot create a map to use as the broken self-bypass map: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = mismatched.Close()
+	})
 	rawFD := mismatched.FD()
 	if rawFD < 0 {
 		t.Fatal("the map has no usable file descriptor to close")
@@ -99,6 +102,7 @@ func TestPrepareTCClosesRealMapsWhenAnExternalSelfMapDoesNotMatch(t *testing.T) 
 		Policy:        policy,
 		SelfBypassMap: mismatched,
 	})
+	_ = mismatched.Close()
 	if err == nil {
 		t.Fatal("a mismatched external self-bypass map was reported as success")
 	}
