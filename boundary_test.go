@@ -106,4 +106,7 @@ func TestZeroTCBackendPolicyUpdateReturnsError(t *testing.T) {
 	if _, err := backend.UpdateLocalDestinationDecisions(nil); err == nil {
 		t.Fatal("zero TC backend policy update unexpectedly succeeded")
 	}
+	if err := backend.SetEndpointVPNReady(true); err == nil {
+		t.Fatal("zero TC backend endpoint update unexpectedly succeeded")
+	}
 }

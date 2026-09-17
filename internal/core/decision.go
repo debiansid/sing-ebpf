@@ -68,6 +68,10 @@ type ActionPolicy struct {
 	EnableUDP bool
 	Local     ActionScope
 	Shared    ActionScope
+	// Endpoint rules identify local traffic whose pass action is gated by
+	// SetEndpointVPNReady. Only DecisionPass entries are accepted.
+	EndpointCIDR []CIDRDecision
+	EndpointPort []PortDecision
 }
 
 func compileDestinationPassDecisions(decisions []CIDRDecision) (dualStackCIDRPrefixes, error) {
