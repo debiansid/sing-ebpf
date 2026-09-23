@@ -94,3 +94,27 @@ func TestCompileActionPolicyDerivesDNSAction(t *testing.T) {
 		t.Fatalf("empty DNS action policy = %v/%v, want respect-policy", policy.localDNSMode, policy.sharedDNSMode)
 	}
 }
+
+func TestDNSHijackWithUIDDefaultPass(t *testing.T) {
+	for _, protocol := range []uint8{ProtocolTCP, ProtocolUDP} {
+		config := ActionPolicy{
+			EnableTCP: true, EnableUDP: true,
+			Local: ActionScope{Default: DecisionPass,
+				UID:             []UIDDecision{{Start: 1000, End: 1000, Action: DecisionIntercept}},
+				DestinationPort: []PortDecision{{Protocol: protocol, Port: 53, Action: DecisionIntercept}},
+			},
+			Shared: ActionScope{Default: DecisionIntercept},
+		}
+		policy, err := CompileActionPolicy(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.localDNSMode != DNSModeHijack || !policy.uidDefaultBypass || len(policy.uidEntries) == 0 {
+			t.Fatalf("lost DNS hijack or UID selection: %+v", policy)
+		}
+		config.Local.DestinationPort[0].Port = 443
+		if _, err = CompileActionPolicy(config); err == nil {
+			t.Fatal("unsupported non-DNS override accepted")
+		}
+	}
+}
