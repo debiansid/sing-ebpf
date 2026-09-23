@@ -196,7 +196,8 @@ func compileActionScope(scope ActionScope, name string) (compiledActionScope, du
 	}
 	for _, rule := range scope.DestinationPort {
 		if rule.Action != DecisionPass {
-			if scope.Default == DecisionPass {
+			// DNS interception is enforced before UID/source selection by the data plane.
+			if scope.Default == DecisionPass && rule.Port != 53 {
 				return compiledActionScope{}, dualStackCIDRPrefixes{}, netip.Prefix{}, netip.Prefix{}, E.New(name, " cannot override a pass default with port intercept")
 			}
 			continue
