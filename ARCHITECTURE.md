@@ -25,7 +25,7 @@ interpreting their own configuration and route rules.
 | Path | Root package owns | `runtime` owns | Consumer owns |
 | --- | --- | --- | --- |
 | local cgroup | object selection, token/original maps, redirect routes, cgroup links, release cleanup | none | listeners, accepted TCP metadata, UDP NAT/session state, UID/package policy |
-| local TC | programs/maps, policy compiler, listeners, assignments, cookie self-bypass | default-interface attachment, delivery veth, policy routing, sysctls, reconciliation | listener/session handling, process metadata, interface events, diagnostics presentation |
+| local TC | programs/maps, policy compiler, listeners, assignments, cookie self-bypass, endpoint/vpn gate maps & TCP flow pinning | default-interface attachment, delivery veth, policy routing, sysctls, reconciliation | listener/session handling, process metadata, interface events, diagnostics presentation, VPN interface detection & readiness |
 | shared socket assignment | programs/maps, assignments, source policy | downstream attachment, policy routing, reconciliation | listeners, shared-source metadata, TCP/UDP handling |
 | shared packet rewrite | rewrite programs/maps, flow lookup/update and counters | downstream attachment, `route_localnet`, health and rollback | token listeners, userspace flow lifecycle, policy translation, warning presentation |
 
@@ -37,6 +37,24 @@ route-rule objects, package names, or a consumer's API schema.
 Force-intercept prefixes are deliberately generic. They allow a consumer to
 give selected destinations precedence over ordinary bypass policy without the
 library learning why those prefixes are special.
+
+### Local TC Endpoint / VPN Server Bypass and TCP Flow Pinning
+
+The local TC data plane provides native kernel gating for endpoint / external VPN server traffic:
+
+- **BPF Maps**:
+  - `tc_endpoint_ipv4`, `tc_endpoint_ipv6`: LPM trie maps (capacity 65536) for destination CIDR prefixes.
+  - `tc_endpoint_port`: hash map (capacity 4096) for transport ports.
+  - `tc_endpoint_flow`: LRU hash map (capacity 8192) storing `sb_tc_endpoint_flow_value` (`socket_cookie`, `intercept`) for TCP flow pinning.
+- **Control Flags**:
+  - `SB_TC_FLAG_ENDPOINT_ENABLED` (`1U << 24`): set when endpoint policy is loaded into local TC.
+  - `SB_TC_FLAG_ENDPOINT_READY` (`1U << 25`): dynamically toggled by `TCBackend.SetEndpointVPNReady(ready)`.
+- **Traffic Handling**:
+  - Traffic matches if its destination IP matches `tc_endpoint_ip*` **and** its destination port matches `tc_endpoint_port`.
+  - While not ready, matching traffic is intercepted into the consumer router.
+  - Once ready, matching traffic is bypassed natively in the kernel.
+  - **TCP Flow Pinning**: Initial SYN decision is pinned into `tc_endpoint_flow` along with `socket_cookie`. Subsequent packets within the same flow look up the pinned value, guaranteeing that established TCP sessions are never reset when the gate transitions between ready and not-ready.
+  - UDP packets follow the live `SB_TC_FLAG_ENDPOINT_READY` flag per packet.
 
 ## Atomic ownership units
 

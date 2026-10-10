@@ -25,6 +25,7 @@ the selected data planes:
 | --- | --- | --- |
 | local | UID, destination CIDR, destination port | UID/package selection, DNS/FakeIP/private/rule-set priority |
 | shared | source CIDR, source MAC, destination CIDR, destination port | downstream selection and source-policy meaning |
+| endpoint / vpn-server | destination CIDR, destination port | conjoint match cross-product, VPN tunnel readiness gating |
 
 The current sing-box adapter enforces this mapping before calling the library:
 local source CIDR/MAC and shared UID decisions are invalid for its four data
@@ -64,6 +65,32 @@ private-address, UID, package, MAC, or port configuration. Process tracking
 also receives only final UID actions and is enabled by sing-box according to
 its `router.NeedFindProcess()` decision.
 
+### Endpoint / VPN-server bypass gate and TCP flow pinning
+
+In addition to static action policy, local TC supports an endpoint / VPN-server
+bypass gate (`ActionPolicy.EndpointCIDR` and `ActionPolicy.EndpointPort`).
+Traffic matching both an endpoint destination CIDR and an endpoint port is
+gated by the `SB_TC_FLAG_ENDPOINT_READY` control flag:
+
+1. **Before readiness** (`ready=false`): matching traffic is forced into
+   interception (`intercept=1`), directing it into the consumer router.
+2. **After readiness** (`ready=true`): matching traffic bypasses local TC
+   natively in the kernel (`intercept=0`).
+
+The consumer updates this gate dynamically via:
+`TCBackend.SetEndpointVPNReady(ready bool) error`
+
+**TCP flow pinning contract**:
+- Upon receiving a TCP SYN packet matching the endpoint gate, the kernel program
+  pins the initial decision (`intercept=1` or `intercept=0`) together with the
+  flow key and `socket_cookie` into the `tc_endpoint_flow` LRU hash map (capacity 8192).
+- Subsequent packets of the established TCP connection look up this pinned entry
+  and preserve the original decision for the duration of the flow.
+- This prevents TCP connections from being reset or encountering broken state
+  when the VPN readiness toggles during an active session.
+- UDP traffic evaluates the live `SB_TC_FLAG_ENDPOINT_READY` flag per packet,
+  migrating to the native direct path once the tunnel becomes ready.
+
 ### Runtime mutation rule
 
 An exported update method is not a promise that every field in `ActionPolicy`
@@ -82,6 +109,8 @@ configuration API.
 | Concern | sing-box | sing-ebpf |
 | --- | --- | --- |
 | JSON/config validation | yes | no |
+| VPN tunnel interface readiness detection | yes | no |
+| Endpoint/VPN gate control flag & TCP flow pinning | no | yes |
 | DNS/FakeIP/rule-set meaning | yes | no |
 | UID/package/MAC/CIDR/port priority | yes | no |
 | Compile a final pass/intercept decision | yes | no |
