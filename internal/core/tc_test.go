@@ -76,6 +76,22 @@ func TestTCEndpointFlags(t *testing.T) {
 	}
 }
 
+func TestTCEndpointFlowCapacity(t *testing.T) {
+	policy := CompiledPolicy{
+		endpoint:            dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}},
+		endpointPortEntries: []tcPortKey{{Protocol: ProtocolTCP, Port: 443}},
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableLocal: true}, policy); capacity != tcEndpointFlowCapacity {
+		t.Fatalf("endpoint flow capacity = %d, want %d", capacity, tcEndpointFlowCapacity)
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableShared: true}, policy); capacity != 1 {
+		t.Fatalf("shared-only endpoint flow capacity = %d, want 1", capacity)
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableLocal: true}, CompiledPolicy{}); capacity != 1 {
+		t.Fatalf("disabled endpoint flow capacity = %d, want 1", capacity)
+	}
+}
+
 func TestEndpointReadyControlFailure(t *testing.T) {
 	b := &TCBackend{runtime: &tcRuntime{}, controlMapFD: -1}
 	b.control.Flags = tcFlagEndpointEnabled | tcFlagTCP

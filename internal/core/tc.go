@@ -26,6 +26,9 @@ const (
 	tcAssignmentCapacity        = 65536
 	CompactTCAssignmentCapacity = 8192
 	tcPortPolicyCapacity        = 4096
+	// tcEndpointFlowCapacity bounds the TCP endpoint flows whose READY gate
+	// decision is pinned. Only flows matching the endpoint policy use it.
+	tcEndpointFlowCapacity = 8192
 )
 
 const (
@@ -239,6 +242,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_endpoint_ipv4":       {name: "sb_tc_endpoint4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv4)), 1), flags: bpfFlagNoPrealloc},
 		"tc_endpoint_ipv6":       {name: "sb_tc_endpoint6", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv6)), 1), flags: bpfFlagNoPrealloc},
 		"tc_endpoint_port":       {name: "sb_tc_endpointp", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.endpointPortEntries)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_flow":       {name: "sb_tc_epflow", mapType: CiliumEBPF.LRUHash, maxEntries: endpointFlowCapacity(config, policy)},
 	}
 	if config.EnableLocal {
 		selfMapCapacity := uint32(selfBypassSocketCapacity)
@@ -291,9 +295,6 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	}
 	if len(policy.sharedInitialBypass.ipv6) > 0 {
 		controlValue.Flags |= tcFlagSharedBypassIPv6
-	}
-	if config.EnableLocal && len(policy.endpointPortEntries) > 0 {
-		controlValue.Flags |= tcFlagEndpointEnabled
 	}
 	if forceInterceptIPv4.IsValid() {
 		controlValue.Flags |= 1 << 10
@@ -472,10 +473,21 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
 	}.tcFlags()
-	if config.EnableLocal && len(policy.endpointPortEntries) > 0 {
+	if endpointPolicyEnabled(config, policy) {
 		flags |= tcFlagEndpointEnabled
 	}
 	return flags
+}
+
+func endpointPolicyEnabled(config TCConfig, policy CompiledPolicy) bool {
+	return config.EnableLocal && len(policy.endpointPortEntries) > 0
+}
+
+func endpointFlowCapacity(config TCConfig, policy CompiledPolicy) uint32 {
+	if endpointPolicyEnabled(config, policy) {
+		return tcEndpointFlowCapacity
+	}
+	return 1
 }
 
 func endpointReadyFlags(flags uint32, ready bool) uint32 {
@@ -486,7 +498,8 @@ func endpointReadyFlags(flags uint32, ready bool) uint32 {
 }
 
 // SetEndpointVPNReady changes only the endpoint gate. Matching local traffic
-// is intercepted until the endpoint is ready, then natively bypassed.
+// is intercepted until the endpoint is ready, then natively bypassed. UDP
+// follows the gate per packet; a TCP flow keeps the decision taken for its SYN.
 func (b *TCBackend) SetEndpointVPNReady(ready bool) error {
 	b.access.Lock()
 	defer b.access.Unlock()
