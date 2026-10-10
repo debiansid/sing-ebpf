@@ -44,6 +44,10 @@ module from importing the original sing-box or sing-tun application packages.
 
 The public runtime surface is deliberately small:
 
+- `TCBackend.SetEndpointVPNReady(ready bool)` dynamically updates the native
+  TC gate for external VPN server / endpoint traffic, forcing interception
+  before tunnel readiness and natively bypassing in the kernel after readiness,
+  with per-TCP-flow pinning to preserve established sessions;
 - `runtime.NewTCRuntime` transfers a prepared `singebpf.TCBackend` into a
   complete TC network-resource owner;
 - `runtime.NewUnstartedTCRuntime` transfers a backend into the same cleanup
@@ -294,6 +298,13 @@ routes. Shared `socket_assign` uses TC listeners and policy routing without a
 delivery veth. Any combination of local and shared choices is valid. Shutdown
 detaches each selected backend and removes only routes owned by that instance. A
 disabled path does not load its object or create network state.
+
+## Branch structure
+
+- **`main`**: Upstream tracking branch for stable runtime releases.
+- **`main-vpn-server-bypass`**: Pinned branch for stable consumers (`sing-box:stable-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
+- **`dev`**: Upstream tracking branch for development runtime releases.
+- **`dev-vpn-server-bypass`**: Pinned branch for development consumers (`sing-box:testing-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
 
 ## Building, generation, and tests
 
