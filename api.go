@@ -303,7 +303,8 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 }
 
 // SetEndpointVPNReady permits native bypass for matching local endpoint traffic
-// while ready and forces interception while not ready.
+// while ready and forces interception while not ready. UDP follows the gate per
+// packet; a TCP flow keeps the decision taken when its SYN was sent.
 func (b *TCBackend) SetEndpointVPNReady(ready bool) error {
 	backend := core.UnwrapTCBackend(b)
 	if backend == nil {
