@@ -18,6 +18,7 @@ import (
 const (
 	TCMapTcAssignment                           = "tc_assignment"
 	TCMapTcControl                              = "tc_control"
+	TCMapTcEndpointFlow                         = "tc_endpoint_flow"
 	TCMapTcEndpointIpv4                         = "tc_endpoint_ipv4"
 	TCMapTcEndpointIpv6                         = "tc_endpoint_ipv6"
 	TCMapTcEndpointPort                         = "tc_endpoint_port"
@@ -117,6 +118,7 @@ type TCProgramSpecs struct {
 type TCMapSpecs struct {
 	TcAssignment        *ebpf.MapSpec `ebpf:"tc_assignment"`
 	TcControl           *ebpf.MapSpec `ebpf:"tc_control"`
+	TcEndpointFlow      *ebpf.MapSpec `ebpf:"tc_endpoint_flow"`
 	TcEndpointIpv4      *ebpf.MapSpec `ebpf:"tc_endpoint_ipv4"`
 	TcEndpointIpv6      *ebpf.MapSpec `ebpf:"tc_endpoint_ipv6"`
 	TcEndpointPort      *ebpf.MapSpec `ebpf:"tc_endpoint_port"`
@@ -168,6 +170,7 @@ func (o *TCObjects) Close() error {
 type TCMaps struct {
 	TcAssignment        *ebpf.Map `ebpf:"tc_assignment"`
 	TcControl           *ebpf.Map `ebpf:"tc_control"`
+	TcEndpointFlow      *ebpf.Map `ebpf:"tc_endpoint_flow"`
 	TcEndpointIpv4      *ebpf.Map `ebpf:"tc_endpoint_ipv4"`
 	TcEndpointIpv6      *ebpf.Map `ebpf:"tc_endpoint_ipv6"`
 	TcEndpointPort      *ebpf.Map `ebpf:"tc_endpoint_port"`
@@ -195,6 +198,7 @@ func (m *TCMaps) Close() error {
 	return _TCClose(
 		m.TcAssignment,
 		m.TcControl,
+		m.TcEndpointFlow,
 		m.TcEndpointIpv4,
 		m.TcEndpointIpv6,
 		m.TcEndpointPort,
