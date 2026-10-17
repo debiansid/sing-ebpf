@@ -19,6 +19,19 @@ const (
 	maxSharedSourceMACPolicyEntries  = 1024
 )
 
+func populateEndpointPortPolicyMap(mapInstance *CiliumEBPF.Map, entries []tcPortKey) error {
+	if mapInstance == nil {
+		return errBackendClosed
+	}
+	value := uint8(1)
+	for _, entry := range entries {
+		if err := mapInstance.Update(&entry, &value, CiliumEBPF.UpdateAny); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func populatePortPolicyMap(mapInstance *CiliumEBPF.Map, entries []compiledPortDecision) error {
 	if mapInstance == nil {
 		return errBackendClosed
@@ -69,6 +82,9 @@ type policyMapTargets struct {
 	ExcludeSourceIPv6 *CiliumEBPF.Map
 	IncludeSourceMAC  *CiliumEBPF.Map
 	ExcludeSourceMAC  *CiliumEBPF.Map
+	EndpointPort      *CiliumEBPF.Map
+	EndpointIPv4      *CiliumEBPF.Map
+	EndpointIPv6      *CiliumEBPF.Map
 }
 
 // populateCompiledPolicyMaps initializes only the policy maps that a backend
@@ -99,6 +115,11 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 			return E.Cause(err, "populate ", scope, " ", entry.name, " bypass policy")
 		}
 	}
+	if targets.EndpointPort != nil && len(policy.endpointPortEntries) > 0 {
+		if err := populateEndpointPortPolicyMap(targets.EndpointPort, policy.endpointPortEntries); err != nil {
+			return E.Cause(err, "populate ", scope, " endpoint port policy")
+		}
+	}
 	for _, entry := range []struct {
 		name     string
 		mapInst  *CiliumEBPF.Map
@@ -116,6 +137,8 @@ func populateCompiledPolicyMaps(targets policyMapTargets, policy CompiledPolicy)
 		{name: "include source IPv6", mapInst: targets.IncludeSourceIPv6, prefixes: policy.includeSource.ipv6},
 		{name: "exclude source IPv4", mapInst: targets.ExcludeSourceIPv4, prefixes: policy.excludeSource.ipv4},
 		{name: "exclude source IPv6", mapInst: targets.ExcludeSourceIPv6, prefixes: policy.excludeSource.ipv6},
+		{name: "endpoint IPv4", mapInst: targets.EndpointIPv4, prefixes: policy.endpoint.ipv4},
+		{name: "endpoint IPv6", mapInst: targets.EndpointIPv6, prefixes: policy.endpoint.ipv6},
 	} {
 		if entry.mapInst == nil || len(entry.prefixes) == 0 {
 			continue
