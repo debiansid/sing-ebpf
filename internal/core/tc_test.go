@@ -114,6 +114,66 @@ func TestTCIPv6PathFlags(t *testing.T) {
 	}
 }
 
+func TestTCEndpointFlags(t *testing.T) {
+	policy := CompiledPolicy{
+		endpoint:            dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}},
+		endpointPortEntries: []tcPortKey{{Protocol: ProtocolTCP, Port: 4500}},
+	}
+	flags := tcFlags(TCConfig{EnableLocal: true}, policy)
+	if flags&tcFlagEndpointEnabled == 0 || flags&tcFlagEndpointReady != 0 {
+		t.Fatalf("unexpected endpoint flags: %#x", flags)
+	}
+	const existingTCFlagNamespace = 1<<30 - 1
+	if tcFlagEndpointEnabled&existingTCFlagNamespace != 0 ||
+		tcFlagEndpointReady&(existingTCFlagNamespace|tcFlagEndpointEnabled) != 0 {
+		t.Fatal("endpoint flag collides with the TC flag namespace")
+	}
+	ready := endpointReadyFlags(flags, true)
+	if ready&tcFlagEndpointReady == 0 || endpointReadyFlags(ready, false) != flags {
+		t.Fatalf("endpoint READY transition failed: %#x", ready)
+	}
+	if tcFlags(TCConfig{EnableShared: true}, policy)&tcFlagEndpointEnabled != 0 {
+		t.Fatal("shared-only backend enabled endpoint policy")
+	}
+}
+
+func TestTCEndpointFlowCapacity(t *testing.T) {
+	policy := CompiledPolicy{
+		endpoint:            dualStackCIDRPrefixes{ipv4: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}},
+		endpointPortEntries: []tcPortKey{{Protocol: ProtocolTCP, Port: 443}},
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableLocal: true}, policy); capacity != tcEndpointFlowCapacity {
+		t.Fatalf("endpoint flow capacity = %d, want %d", capacity, tcEndpointFlowCapacity)
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableShared: true}, policy); capacity != 1 {
+		t.Fatalf("shared-only endpoint flow capacity = %d, want 1", capacity)
+	}
+	if capacity := endpointFlowCapacity(TCConfig{EnableLocal: true}, CompiledPolicy{}); capacity != 1 {
+		t.Fatalf("disabled endpoint flow capacity = %d, want 1", capacity)
+	}
+}
+
+// Endpoint CIDR and port maps are sized to the configured policy, so a full
+// map is expected and must not report pressure.
+func TestTCEndpointMapsAreConfiguredPolicy(t *testing.T) {
+	for _, name := range []string{"sb_tc_endpoint4", "sb_tc_endpoint6", "sb_tc_endpointp"} {
+		if got := metadataForMapName(name).category; got != MapCategoryConfiguredPolicy {
+			t.Fatalf("%s category = %q, want %q", name, got, MapCategoryConfiguredPolicy)
+		}
+	}
+}
+
+func TestEndpointReadyControlFailure(t *testing.T) {
+	b := &TCBackend{runtime: &tcRuntime{}, controlMapFD: -1}
+	b.control.Flags = tcFlagEndpointEnabled | tcFlagTCP
+	if err := b.SetEndpointVPNReady(false); err != nil {
+		t.Fatalf("unchanged state wrote the control map: %v", err)
+	}
+	if err := b.SetEndpointVPNReady(true); err == nil || b.control.Flags != tcFlagEndpointEnabled|tcFlagTCP {
+		t.Fatal("failed control write committed READY")
+	}
+}
+
 func TestMakeTCAssignKey(t *testing.T) {
 	for _, test := range []struct {
 		source      string

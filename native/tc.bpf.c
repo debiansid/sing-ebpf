@@ -322,6 +322,8 @@ static long (*sk_assign)(void *ctx, struct bpf_sock *socket, __u64 flags) =
     (void *)BPF_FUNC_sk_assign;
 static void (*sk_release)(struct bpf_sock *socket) = (void *)BPF_FUNC_sk_release;
 
+#include "tc_endpoint.h"
+
 INLINE void increment_stat(__u32 index) {
     if (index >= SB_TC_STAT_COUNT) return;
     __u64 *value = map_lookup(&tc_stats, &index);
@@ -501,8 +503,11 @@ INLINE bool shared_source_selected(const struct sb_tc_control *control,
 }
 
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
+    const struct sb_tc_assign_key *key, __u32 socket_metadata_value, __u64 socket_cookie, __u8 tcp_flags) {
     if (force_intercept_destination(control, key, false)) return true;
+    if (endpoint_destination(control, key)) {
+        return endpoint_intercepted(control, key, tcp_flags, socket_cookie);
+    }
     __u8 action = port_action(control, key, false);
     if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
     if (action == SB_PORT_INTERCEPT) return true;
@@ -835,7 +840,7 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     __u32 socket_metadata_value = socket_metadata(socket_cookie);
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_SELF_BYPASS) != 0U) return TC_ACT_UNSPEC;
     if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_LOCAL_FRAGMENT_PASS);
-    if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
+    if (!local_selected(skb, control, &key, socket_metadata_value, socket_cookie, flags)) return TC_ACT_UNSPEC;
     return redirect_isolated(skb, control, &key, track_process ? socket_cookie : 0U,
         SB_TC_PATH_DELIVERY | (ethernet ? SB_TC_RETURN_ETHERNET : 0U) | assignment_record(&key, flags));
 }

@@ -28,6 +28,8 @@ type CompiledPolicy struct {
 	sharedBypassPortEntries []compiledPortDecision
 	localInitialBypass      dualStackCIDRPrefixes
 	sharedInitialBypass     dualStackCIDRPrefixes
+	endpoint                dualStackCIDRPrefixes
+	endpointPortEntries     []tcPortKey
 }
 
 type compiledPortDecision struct {
@@ -53,6 +55,10 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 	if err != nil {
 		return CompiledPolicy{}, err
 	}
+	endpoint, endpointPorts, err := compileEndpointPolicy(config)
+	if err != nil {
+		return CompiledPolicy{}, err
+	}
 	return CompiledPolicy{
 		uidEntries: local.uidEntries, uidDefaultBypass: local.uidDefaultBypass,
 		sharedDefaultBypass: config.Shared.Default == DecisionPass,
@@ -62,6 +68,8 @@ func CompileActionPolicy(config ActionPolicy) (CompiledPolicy, error) {
 		includeSourceMAC: shared.includeSourceMAC, excludeSourceMAC: shared.excludeSourceMAC,
 		localBypassPortEntries: local.ports, sharedBypassPortEntries: shared.ports,
 		localInitialBypass: local.bypass, sharedInitialBypass: shared.bypass,
+		endpoint:            endpoint,
+		endpointPortEntries: endpointPorts,
 	}, nil
 }
 

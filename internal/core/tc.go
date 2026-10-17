@@ -228,8 +228,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	includeIPv4, includeIPv6 := policy.includeSource.ipv4, policy.includeSource.ipv6
 	excludeIPv4, excludeIPv6 := policy.excludeSource.ipv4, policy.excludeSource.ipv6
 	if err = checkLPMTriePolicyCompatibility(
-		"TC eBPF UID and source CIDR",
-		len(uidEntries)+len(includeIPv4)+len(includeIPv6)+len(excludeIPv4)+len(excludeIPv6),
+		"TC eBPF UID, source CIDR, and endpoint CIDR",
+		len(uidEntries)+len(includeIPv4)+len(includeIPv6)+len(excludeIPv4)+len(excludeIPv6)+
+			len(policy.endpoint.ipv4)+len(policy.endpoint.ipv6),
 	); err != nil {
 		return nil, err
 	}
@@ -255,6 +256,10 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		"tc_host_ipv6":           {name: "sb_tc_host6", mapType: CiliumEBPF.Hash, maxEntries: maxHostAddressPolicyEntries, flags: bpfFlagNoPrealloc},
 		"tc_local_bypass_port":   {name: "sb_tc_lport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.localBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
 		"tc_shared_bypass_port":  {name: "sb_tc_sport", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.sharedBypassPortEntries)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_ipv4":       {name: "sb_tc_endpoint4", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv4)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_ipv6":       {name: "sb_tc_endpoint6", mapType: CiliumEBPF.LPMTrie, maxEntries: max(uint32(len(policy.endpoint.ipv6)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_port":       {name: "sb_tc_endpointp", mapType: CiliumEBPF.Hash, maxEntries: max(uint32(len(policy.endpointPortEntries)), 1), flags: bpfFlagNoPrealloc},
+		"tc_endpoint_flow":       {name: "sb_tc_epflow", mapType: CiliumEBPF.LRUHash, maxEntries: endpointFlowCapacity(config, policy)},
 	}
 	addForceMapOverrides(mapOverrides, "tc_local", "sb_tc_lforce", policy.localForce)
 	addForceMapOverrides(mapOverrides, "tc_shared", "sb_tc_sforce", policy.sharedForce)
@@ -374,6 +379,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		LocalBypassIPv6:   maps["tc_local_bypass_ipv6"],
 		SharedBypassIPv4:  maps["tc_shared_bypass_ipv4"],
 		SharedBypassIPv6:  maps["tc_shared_bypass_ipv6"],
+		EndpointPort:      maps["tc_endpoint_port"],
+		EndpointIPv4:      maps["tc_endpoint_ipv4"],
+		EndpointIPv6:      maps["tc_endpoint_ipv6"],
 		IncludeSourceIPv4: maps["tc_include_source_ipv4"],
 		IncludeSourceIPv6: maps["tc_include_source_ipv6"],
 		ExcludeSourceIPv4: maps["tc_exclude_source_ipv4"],
@@ -490,7 +498,7 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 }
 
 func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
-	return policyVector{
+	flags := policyVector{
 		EnableTCP:           config.EnableTCP,
 		EnableUDP:           config.EnableUDP,
 		EnableIPv4:          config.EnableIPv4,
@@ -508,6 +516,7 @@ func tcFlags(config TCConfig, policy CompiledPolicy) uint32 {
 		IncludeSourceMAC:    len(policy.includeSourceMAC) > 0,
 		ExcludeSourceMAC:    len(policy.excludeSourceMAC) > 0,
 	}.tcFlags()
+	return applyEndpointFlags(flags, config, policy)
 }
 
 func (b *TCBackend) requireUsableLocked() error {
