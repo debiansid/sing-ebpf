@@ -121,7 +121,7 @@ INLINE int isolated_delivery(struct __sk_buff *skb, bool legacy, bool udp_only) 
     struct sb_tc_assign_key flow;
     __u8 mac[6];
     if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6 | SB_TC_FLAG_SHARED_IPV6,
-            true, &flow, mac, SB_TC_STAT_COUNT)) return TC_ACT_SHOT;
+            true, &flow, mac, SB_TC_STAT_COUNT, 0)) return TC_ACT_SHOT;
     struct bpf_sock *socket;
     if (!udp_only && flow.protocol == IPPROTO_TCP_VALUE) {
         socket = legacy ? lookup_tcp_socket_legacy(skb, control, &flow) : lookup_tcp_socket(skb, &flow);
@@ -174,9 +174,9 @@ int sing_ebpf_tc_isolated_return(struct __sk_buff *skb) {
     __u32 offset;
     if (!parse_ethernet(data, end, &protocol, &offset, mac)) return TC_ACT_SHOT;
     if (protocol == ETH_P_IP_VALUE) {
-        if (!fill_ipv4_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment)) return TC_ACT_SHOT;
+        if (!fill_ipv4_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment, 0)) return TC_ACT_SHOT;
     } else if (protocol == ETH_P_IPV6_VALUE) {
-        if (!fill_ipv6_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment)) return TC_ACT_SHOT;
+        if (!fill_ipv6_key(data, end, offset, control, &flow, SB_TC_STAT_COUNT, &fragment, 0)) return TC_ACT_SHOT;
     } else {
         return TC_ACT_SHOT;
     }

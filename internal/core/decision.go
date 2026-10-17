@@ -74,6 +74,12 @@ type ActionScope struct {
 type ActionPolicy struct {
 	Local  ActionScope
 	Shared ActionScope
+	// Endpoint rules identify local traffic whose pass action is gated by
+	// SetEndpointVPNReady. Only DecisionPass entries are accepted. They are
+	// consumed by the local TC data path only; cgroup and shared backends
+	// ignore them, so the integration layer must reject them there.
+	EndpointCIDR []CIDRDecision
+	EndpointPort []PortDecision
 }
 
 func compileDestinationPassDecisions(decisions []CIDRDecision) (dualStackCIDRPrefixes, error) {
