@@ -34,6 +34,7 @@
 #define IPV6_FRAGMENT_OFFSET_MASK 0xfff8U
 #define IPV6_FRAGMENT_MORE 0x0001U
 #define TCP_FLAG_SYN 0x02U
+#define TCP_FLAG_ACK 0x10U
 #define TCP_FLAGS_OFFSET 13U
 
 #define SB_TC_FLAG_IPV4 (1U << 0)
@@ -60,6 +61,8 @@
 #define SB_TC_FLAG_SHARED_BYPASS_PORT (1U << 21)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV4 (1U << 22)
 #define SB_TC_FLAG_SHARED_BYPASS_IPV6 (1U << 23)
+#define SB_TC_FLAG_ENDPOINT_ENABLED (1U << 24)
+#define SB_TC_FLAG_ENDPOINT_READY (1U << 25)
 
 #define SB_TC_SOCKET_POLICY_BYPASS 1U
 #define SB_TC_SOCKET_POLICY_INTERCEPT 2U
@@ -148,6 +151,13 @@ struct sb_tc_assign_value {
     __u8 source_mac_valid;
     __u32 generation;
 };
+
+struct sb_tc_endpoint_flow_value {
+    __u64 socket_cookie;
+    __u8 intercept;
+    __u8 reserved[7];
+};
+_Static_assert(sizeof(struct sb_tc_endpoint_flow_value) == 16, "sb_tc_endpoint_flow_value ABI size");
 
 _Static_assert(sizeof(struct sb_tc_control) == 32, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
@@ -250,6 +260,10 @@ SB_FORCE_MAPS(tc_shared);
 
 MAP(tc_local_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
 MAP(tc_shared_bypass_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
+MAP(tc_endpoint_ipv4, struct sb_tc_ipv4_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);
+MAP(tc_endpoint_ipv6, struct sb_tc_ipv6_lpm_key, __u8, BPF_MAP_TYPE_LPM_TRIE, 65536U);
+MAP(tc_endpoint_port, struct sb_tc_port_key, __u8, BPF_MAP_TYPE_HASH, 4096U);
+MAP(tc_endpoint_flow, struct sb_tc_assign_key, struct sb_tc_endpoint_flow_value, BPF_MAP_TYPE_LRU_HASH, 8192U);
 
 static void *(*map_lookup)(void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
 static long (*map_update)(void *map, const void *key, const void *value, __u64 flags) =
@@ -442,9 +456,45 @@ INLINE bool shared_source_selected(const struct sb_tc_control *control,
     return source_address_included(control, flow) || source_mac_included(control, source_mac);
 }
 
+INLINE bool endpoint_destination(const struct sb_tc_control *control,
+    const struct sb_tc_assign_key *flow) {
+    if ((control->flags & SB_TC_FLAG_ENDPOINT_ENABLED) == 0U) return false;
+    struct sb_tc_port_key port_key = {.protocol = flow->protocol, .port = flow->destination_port};
+    if (map_lookup(&tc_endpoint_port, &port_key) == 0) return false;
+    if (flow->family == AF_INET_VALUE) {
+        struct sb_tc_ipv4_lpm_key key = {.prefixlen = 32U};
+        __builtin_memcpy(key.address, flow->destination_addr, 4U);
+        return map_lookup(&tc_endpoint_ipv4, &key) != 0;
+    }
+    struct sb_tc_ipv6_lpm_key key = {.prefixlen = 128U};
+    __builtin_memcpy(key.address, flow->destination_addr, 16U);
+    return map_lookup(&tc_endpoint_ipv6, &key) != 0;
+}
+
+INLINE bool endpoint_intercepted(const struct sb_tc_control *control,
+    const struct sb_tc_assign_key *flow, __u8 tcp_flags, __u64 socket_cookie) {
+    __u8 intercept = (control->flags & SB_TC_FLAG_ENDPOINT_READY) == 0U ? 1U : 0U;
+    if (flow->protocol != IPPROTO_TCP_VALUE) return intercept != 0U;
+    struct sb_tc_endpoint_flow_value *pinned = map_lookup(&tc_endpoint_flow, flow);
+    if ((tcp_flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) != TCP_FLAG_SYN) {
+        if (pinned != 0) return pinned->intercept != 0U;
+        // Without a pinned entry, intercept only if the flow is already assigned to the listener.
+        return map_lookup(&tc_assignment, flow) != 0;
+    }
+    if (pinned != 0 && socket_cookie != 0U && pinned->socket_cookie == socket_cookie) {
+        return pinned->intercept != 0U;
+    }
+    struct sb_tc_endpoint_flow_value value = {.socket_cookie = socket_cookie, .intercept = intercept};
+    map_update(&tc_endpoint_flow, flow, &value, BPF_ANY);
+    return intercept != 0U;
+}
+
 INLINE bool local_selected(struct __sk_buff *skb, const struct sb_tc_control *control,
-    const struct sb_tc_assign_key *key, __u32 socket_metadata_value) {
+    const struct sb_tc_assign_key *key, __u32 socket_metadata_value, __u64 socket_cookie, __u8 tcp_flags) {
     if (force_intercept_destination(control, key, false)) return true;
+    if (endpoint_destination(control, key)) {
+        return endpoint_intercepted(control, key, tcp_flags, socket_cookie);
+    }
     __u8 action = port_action(control, key, false);
     if ((action & ~SB_PORT_AFTER_SELECTORS) == SB_PORT_PASS) return false;
     if (action == SB_PORT_INTERCEPT) return true;
@@ -766,7 +816,7 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     __u32 socket_metadata_value = socket_metadata(socket_cookie);
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_SELF_BYPASS) != 0U) return TC_ACT_UNSPEC;
     if (parsed != SB_TC_PARSE_FLOW) return parse_pass(parsed, SB_TC_STAT_LOCAL_FRAGMENT_PASS);
-    if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
+    if (!local_selected(skb, control, &key, socket_metadata_value, socket_cookie, flags)) return TC_ACT_UNSPEC;
     return redirect_isolated(skb, control, &key, track_process ? socket_cookie : 0U,
         SB_TC_PATH_DELIVERY | (ethernet ? SB_TC_RETURN_ETHERNET : 0U) | assignment_record(&key, flags));
 }

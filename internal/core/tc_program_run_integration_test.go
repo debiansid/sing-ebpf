@@ -225,6 +225,139 @@ func forceInterceptPolicyPrecedencePackets() map[string][]byte {
 	}
 }
 
+func TestTCEndpointReadyGateIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "verify TC endpoint READY gate")
+	endpoint := netip.MustParsePrefix("203.0.113.0/24")
+	policy, err := CompileActionPolicy(ActionPolicy{
+		Local: ActionScope{
+			Default:         DecisionIntercept,
+			DestinationPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}},
+		},
+		Shared:       ActionScope{Default: DecisionIntercept},
+		EndpointCIDR: []CIDRDecision{{Prefix: endpoint, Action: DecisionPass}},
+		EndpointPort: []PortDecision{{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := PrepareTC(TCConfig{
+		ListenerPort: 65531, EnableLocal: true, EnableIPv4: true, EnableTCP: true,
+		DeliveryInterface: 1, Policy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if _, err = backend.UpdateLocalDestinationDecisions([]CIDRDecision{{Prefix: endpoint, Action: DecisionPass}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	program := backend.runtime.programs[tcProgramLocalEgressEthernet]
+	packet := testIPv4TCPPacket(netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("203.0.113.10"), 53000, 4500)
+	if action, _ := runTCProgram(t, program, packet); action != 7 {
+		t.Fatalf("NOT READY endpoint was bypassed by generic pass decisions: action=%d", action)
+	}
+	if err = backend.SetEndpointVPNReady(true); err != nil {
+		t.Fatal(err)
+	}
+	if action, _ := runTCProgram(t, program, packet); action != testTCActUnspec {
+		t.Fatalf("READY endpoint did not native-bypass: action=%d", action)
+	}
+	if err = backend.SetEndpointVPNReady(false); err != nil {
+		t.Fatal(err)
+	}
+	if action, _ := runTCProgram(t, program, packet); action != 7 {
+		t.Fatalf("disconnect did not restore endpoint interception: action=%d", action)
+	}
+}
+
+func TestTCEndpointTCPFlowPinIntegration(t *testing.T) {
+	requireEBPFIntegration(t, "verify TC endpoint TCP flow pinning")
+	endpoint := netip.MustParsePrefix("203.0.113.0/24")
+	policy, err := CompileActionPolicy(ActionPolicy{
+		Local:        ActionScope{Default: DecisionIntercept},
+		Shared:       ActionScope{Default: DecisionIntercept},
+		EndpointCIDR: []CIDRDecision{{Prefix: endpoint, Action: DecisionPass}},
+		EndpointPort: []PortDecision{
+			{Protocol: ProtocolTCP, Port: 4500, Action: DecisionPass},
+			{Protocol: ProtocolUDP, Port: 4500, Action: DecisionPass},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := PrepareTC(TCConfig{
+		ListenerPort: 65531, EnableLocal: true, EnableIPv4: true, EnableTCP: true, EnableUDP: true,
+		DeliveryInterface: 1, Policy: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if err = backend.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	program := backend.runtime.programs[tcProgramLocalEgressEthernet]
+	source := netip.MustParseAddr("192.0.2.10")
+	destination := netip.MustParseAddr("203.0.113.10")
+	tcpPacket := func(sourcePort uint16, flags byte) []byte {
+		packet := testIPv4TCPPacket(source, destination, sourcePort, 4500)
+		packet[14+20+13] = flags
+		return packet
+	}
+	udpPacket := func(sourcePort uint16) []byte {
+		packet := testIPv4TCPPacket(source, destination, sourcePort, 4500)[:14+20+8]
+		packet[14+9] = ProtocolUDP
+		binary.BigEndian.PutUint16(packet[14+2:14+4], 28)
+		binary.BigEndian.PutUint16(packet[14+20+4:14+20+6], 8)
+		return packet
+	}
+	const (
+		syn       = 0x02
+		ack       = 0x10
+		intercept = 7
+		bypass    = testTCActUnspec
+	)
+	expect := func(name string, packet []byte, want uint32) {
+		t.Helper()
+		if action, _ := runTCProgram(t, program, packet); action != want {
+			t.Fatalf("%s: action=%d, want %d", name, action, want)
+		}
+	}
+	setReady := func(ready bool) {
+		t.Helper()
+		if err := backend.SetEndpointVPNReady(ready); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expect("NOT READY SYN", tcpPacket(53000, syn), intercept)
+	expect("NOT READY UDP", udpPacket(53100), intercept)
+	setReady(true)
+	expect("intercepted flow after READY", tcpPacket(53000, ack), intercept)
+	flowKey, err := makeTCAssignKey(ProtocolTCP, netip.AddrPortFrom(source, 53000), netip.AddrPortFrom(destination, 4500), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = backend.runtime.maps["tc_endpoint_flow"].Delete(flowKey); err != nil {
+		t.Fatal(err)
+	}
+	expect("intercepted flow survives pin eviction", tcpPacket(53000, ack), intercept)
+	expect("new SYN after READY", tcpPacket(53001, syn), bypass)
+	expect("bypassed flow after READY", tcpPacket(53001, ack), bypass)
+	expect("UDP migrates after READY", udpPacket(53100), bypass)
+	setReady(false)
+	expect("bypassed flow after disconnect", tcpPacket(53001, ack), bypass)
+	expect("intercepted flow after disconnect", tcpPacket(53000, ack), intercept)
+	expect("unpinned unassigned flow passes", tcpPacket(53002, ack), bypass)
+	expect("UDP migrates after disconnect", udpPacket(53100), intercept)
+	setReady(true)
+	expect("reused tuple SYN is decided again", tcpPacket(53000, syn), bypass)
+	expect("reused tuple keeps new decision", tcpPacket(53000, ack), bypass)
+}
+
 func TestTCIPv6PathIsolationIntegration(t *testing.T) {
 	requireEBPFIntegration(t, "verify TC eBPF IPv6 path isolation")
 	requireTCSocketAssignment(t)
