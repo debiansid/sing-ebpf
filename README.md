@@ -44,6 +44,10 @@ module from importing the original sing-box or sing-tun application packages.
 
 The public runtime surface is deliberately small:
 
+- `TCBackend.SetEndpointVPNReady(ready bool)` dynamically updates the native
+  TC gate for external VPN server / endpoint traffic, forcing interception
+  before tunnel readiness and natively bypassing in the kernel after readiness,
+  with per-TCP-flow pinning to preserve established sessions;
 - `runtime.NewTCRuntime` transfers a prepared `singebpf.TCBackend` into a
   complete TC network-resource owner;
 - `runtime.NewUnstartedTCRuntime` transfers a backend into the same cleanup
@@ -530,6 +534,13 @@ consumer as root. Kernels before 5.11 also charge BPF memory to the per-user
 a possible memlock problem, so the library replaces that hint with the
 diagnosed cause: missing capabilities, a non-initial user namespace, or a
 memlock limit that could not be raised.
+
+## Branch structure
+
+- **`main`**: Upstream tracking branch for stable runtime releases.
+- **`main-vpn-server-bypass`**: Pinned branch for stable consumers (`sing-box:stable-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
+- **`dev`**: Upstream tracking branch for development runtime releases.
+- **`dev-vpn-server-bypass`**: Pinned branch for development consumers (`sing-box:testing-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
 
 ## Building, generation, and tests
 
