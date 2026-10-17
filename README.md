@@ -44,6 +44,10 @@ module from importing the original sing-box or sing-tun application packages.
 
 The public runtime surface is deliberately small:
 
+- `TCBackend.SetEndpointVPNReady(ready bool)` dynamically updates the native
+  TC gate for external VPN server / endpoint traffic, forcing interception
+  before tunnel readiness and natively bypassing in the kernel after readiness,
+  with per-TCP-flow pinning to preserve established sessions;
 - `runtime.NewTCRuntime` transfers a prepared `singebpf.TCBackend` into a
   complete TC network-resource owner;
 - `runtime.NewUnstartedTCRuntime` transfers a backend into the same cleanup
@@ -415,6 +419,13 @@ fingerprint, kernel configuration, SELinux denials, and selected fallback modes.
 The checked-in objects are pure-Go runtime assets: users do not need an Android
 NDK, clang, bpftool, or BTF/CO-RE. Maintainers regenerate them with Android NDK
 r29 Clang 21 and commit both endian variants and the manifest.
+
+## Branch structure
+
+- **`main`**: Upstream tracking branch for stable runtime releases.
+- **`main-vpn-server-bypass`**: Pinned branch for stable consumers (`sing-box:stable-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
+- **`dev`**: Upstream tracking branch for development runtime releases.
+- **`dev-vpn-server-bypass`**: Pinned branch for development consumers (`sing-box:testing-ebpf`), providing native TC VPN server bypass and TCP flow pinning.
 
 ## Building, generation, and tests
 
