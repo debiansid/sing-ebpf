@@ -192,7 +192,7 @@ func TestSelfBypassModes(t *testing.T) {
 		{SelfBypassCgroupSocket, "cgroup_socket_cookie", "socket_release", true},
 		{SelfBypassCgroupSocketAddr, "cgroup_socket_addr", "userspace_unregister", true},
 		{SelfBypassCgroupSocketAddrRelease, "cgroup_socket_addr_release", "socket_release", true},
-		{SelfBypassUserspaceRelease, "userspace_socket_cookie_release", "socket_release", false},
+		{SelfBypassUserspaceRelease, "userspace_socket_cookie_release", "userspace_unregister", false},
 	}
 	for _, test := range tests {
 		if test.mode.String() != test.name {
@@ -307,5 +307,66 @@ func TestSelfBypassRegisterSocketCreatesMap(t *testing.T) {
 	var value uint32
 	if err = sockets.Lookup(&cookie, &value); err != nil || value != 1 {
 		t.Fatalf("registered socket missing from the map: value=%d err=%v", value, err)
+	}
+
+	// UnregisterSocket must delete the socket
+	if err = bypass.UnregisterSocket(rawConn); err != nil {
+		t.Fatalf("UnregisterSocket failed: %v", err)
+	}
+	if err = sockets.Lookup(&cookie, &value); !errors.Is(err, CiliumEBPF.ErrKeyNotExist) {
+		t.Fatalf("unregistered socket still in map: %v", err)
+	}
+	// Duplicate unregister should not return error
+	if err = bypass.UnregisterSocket(rawConn); err != nil {
+		t.Fatalf("duplicate UnregisterSocket returned error: %v", err)
+	}
+	if err = bypass.UnregisterCookie(cookie); err != nil {
+		t.Fatalf("UnregisterCookie returned error: %v", err)
+	}
+}
+
+func TestSelfBypassEvictionOnFullMap(t *testing.T) {
+	// Create map with capacity 2
+	bypass, err := NewSelfBypassWithCapacity(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bypass.Close()
+	m, err := bypass.PreparedMap()
+	if err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skipf("BPF maps unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	// Insert 2 entries manually
+	k1, k2, v := uint64(100), uint64(200), uint32(1)
+	if err = m.Update(&k1, &v, CiliumEBPF.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.Update(&k2, &v, CiliumEBPF.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	// Map is full. Now register a socket via RegisterSocketCookie
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	rawConn, err := conn.(*net.UDPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := bypass.RegisterSocketCookie(rawConn)
+	if err != nil {
+		t.Fatalf("RegisterSocketCookie failed on full map: %v", err)
+	}
+	if cookie == 0 {
+		t.Fatal("cookie is 0")
+	}
+	// Cookie should be in map
+	var lookupVal uint32
+	if err = m.Lookup(&cookie, &lookupVal); err != nil {
+		t.Fatalf("new cookie not found in map after eviction: %v", err)
 	}
 }

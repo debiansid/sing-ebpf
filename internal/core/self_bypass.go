@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -89,11 +90,12 @@ func (m SelfBypassMode) String() string {
 }
 
 // CleanupMode reports how entries in the self-bypass map are removed.
-// The map itself never silently evicts entries; when no release hook is
-// available, callers must explicitly unregister sockets.
+// When userspace registration is used, callers must explicitly unregister
+// sockets because a release hook on a shared cgroup cannot catch every
+// thread or failed dial.
 func (m SelfBypassMode) CleanupMode() string {
 	switch m {
-	case SelfBypassCgroupSocket, SelfBypassCgroupSocketAddrRelease, SelfBypassUserspaceRelease:
+	case SelfBypassCgroupSocket, SelfBypassCgroupSocketAddrRelease:
 		return "socket_release"
 	default:
 		return "userspace_unregister"
@@ -527,12 +529,11 @@ func selfBypassSocketAddrInstructions(mapFD int, ownerTGID uint32) asm.Instructi
 	)
 }
 
-// RegisterSocket records a socket created by the consumer when cgroup hooks
-// cannot mark it automatically. It performs one SO_COOKIE read and one map
-// update per socket.
-func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
+// RegisterSocketCookie records a socket created by the consumer when cgroup
+// hooks cannot mark it automatically. It returns the 64-bit socket cookie.
+func (b *SelfBypass) RegisterSocketCookie(rawConn syscall.RawConn) (uint64, error) {
 	if b == nil {
-		return nil
+		return 0, nil
 	}
 	b.access.RLock()
 	if b.sockets == nil && !b.closed {
@@ -541,13 +542,13 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 		// a failure fails the socket rather than leaving it unregistered.
 		b.access.RUnlock()
 		if _, err := b.PreparedMap(); err != nil && !errors.Is(err, errSelfBypassClosed) {
-			return err
+			return 0, err
 		}
 		b.access.RLock()
 	}
 	defer b.access.RUnlock()
 	if b.sockets == nil {
-		return nil
+		return 0, nil
 	}
 	var cookie uint64
 	err := control.Raw(rawConn, func(fd uintptr) error {
@@ -556,20 +557,79 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 		return err
 	})
 	if err != nil {
-		return E.Cause(err, "read socket cookie for eBPF self-bypass")
+		return 0, E.Cause(err, "read socket cookie for eBPF self-bypass")
 	}
 	if cookie == 0 {
-		return E.New("socket returned an empty eBPF self-bypass cookie")
+		return 0, E.New("socket returned an empty eBPF self-bypass cookie")
 	}
 	value := uint32(1)
 	if err = b.sockets.Update(&cookie, &value, CiliumEBPF.UpdateAny); err != nil {
-		return E.Cause(err, "register eBPF self-bypass socket")
+		if isMapFullError(err) {
+			if b.evictBatchLocked(128) > 0 {
+				err = b.sockets.Update(&cookie, &value, CiliumEBPF.UpdateAny)
+			}
+		}
+		if err != nil {
+			return 0, E.Cause(err, "register eBPF self-bypass socket")
+		}
+	}
+	return cookie, nil
+}
+
+func isMapFullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, unix.E2BIG) || errors.Is(err, syscall.E2BIG) || strings.Contains(err.Error(), "key too big for map")
+}
+
+// RegisterSocket records a socket created by the consumer when cgroup hooks
+// cannot mark it automatically. It performs one SO_COOKIE read and one map
+// update per socket.
+func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
+	_, err := b.RegisterSocketCookie(rawConn)
+	return err
+}
+
+func (b *SelfBypass) evictBatchLocked(count int) int {
+	if b.sockets == nil || count <= 0 {
+		return 0
+	}
+	iterator := b.sockets.Iterate()
+	var (
+		key     uint64
+		val     uint32
+		deleted int
+	)
+	for deleted < count && iterator.Next(&key, &val) {
+		if err := b.sockets.Delete(&key); err == nil {
+			deleted++
+		}
+	}
+	return deleted
+}
+
+// UnregisterCookie removes a socket cookie previously registered.
+func (b *SelfBypass) UnregisterCookie(cookie uint64) error {
+	if b == nil || cookie == 0 {
+		return nil
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.sockets == nil {
+		return nil
+	}
+	if err := b.sockets.Delete(&cookie); err != nil {
+		if errors.Is(err, CiliumEBPF.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return E.Cause(err, "unregister eBPF self-bypass socket cookie")
 	}
 	return nil
 }
 
 // UnregisterSocket removes a socket previously registered by RegisterSocket.
-// Call it before closing the socket when no kernel release hook is active.
+// Call it before closing the socket.
 // The cookie is read from the supplied live socket, so deletion cannot target
 // a different socket that reused an old descriptor.
 func (b *SelfBypass) UnregisterSocket(rawConn syscall.RawConn) error {
@@ -578,7 +638,7 @@ func (b *SelfBypass) UnregisterSocket(rawConn syscall.RawConn) error {
 	}
 	b.access.RLock()
 	defer b.access.RUnlock()
-	if b.sockets == nil || b.Mode().CleanupMode() == "socket_release" {
+	if b.sockets == nil {
 		return nil
 	}
 	var cookie uint64
@@ -594,6 +654,9 @@ func (b *SelfBypass) UnregisterSocket(rawConn syscall.RawConn) error {
 		return nil
 	}
 	if err = b.sockets.Delete(&cookie); err != nil {
+		if errors.Is(err, CiliumEBPF.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+			return nil
+		}
 		return E.Cause(err, "unregister eBPF self-bypass socket")
 	}
 	return nil

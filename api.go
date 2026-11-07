@@ -187,11 +187,25 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 	return core.UnwrapSelfBypass(b).RegisterSocket(rawConn)
 }
 
+func (b *SelfBypass) RegisterSocketCookie(rawConn syscall.RawConn) (uint64, error) {
+	if b == nil {
+		return core.UnwrapSelfBypass(nil).RegisterSocketCookie(rawConn)
+	}
+	return core.UnwrapSelfBypass(b).RegisterSocketCookie(rawConn)
+}
+
 func (b *SelfBypass) UnregisterSocket(rawConn syscall.RawConn) error {
 	if b == nil {
 		return nil
 	}
 	return core.UnwrapSelfBypass(b).UnregisterSocket(rawConn)
+}
+
+func (b *SelfBypass) UnregisterCookie(cookie uint64) error {
+	if b == nil {
+		return nil
+	}
+	return core.UnwrapSelfBypass(b).UnregisterCookie(cookie)
 }
 
 func (b *SelfBypass) IsClosed() bool {
