@@ -2,17 +2,24 @@
 set -euo pipefail
 version="$1"
 work="$2"
-case "$version" in
+source="${3:-}"
+url="https://cdn.kernel.org/pub/linux/kernel/v${version%%.*}.x/linux-$version.tar.xz"
+checksum=
+if [ -n "$source" ]; then
+  # shortcut: mainline snapshots publish no checksum, so HTTPS from kernel.org is the only integrity check; keep it to the non-blocking mainline job.
+  url="$source"
+else case "$version" in
   4.19.325) checksum=607bed7de5cda31a443df4c8a78dbe5e8a9ad31afde2a4d28fe99ab4730e8de1 ;;
   5.4.290) checksum=6cc73cf2a7f50580f7d8c7e99d2f2e8ada8b7d2f4e76f5896f0daf691cc2a456 ;;
   5.10.240) checksum=8d88c3977226d666554b75f480d1e6c5f4e4d2acdf2a3462840c6bac88634d13 ;;
   6.6.110) checksum=1bf20daf5543b8759f325e55fb0da4913715e68741627a13380e66aaf219fb1d ;;
+  6.12.116) checksum=cb3ed3dfdd47e6ade49dc933db334fd86e24cadee920da612c262b0e9b6a511b ;;
   *) echo "unsupported test kernel: $version" >&2; exit 1 ;;
-esac
+esac; fi
 mkdir -p "$work"
-curl --fail --location --retry 3 "https://cdn.kernel.org/pub/linux/kernel/v${version%%.*}.x/linux-$version.tar.xz" -o "$work/kernel.tar.xz"
-printf '%s  %s\n' "$checksum" "$work/kernel.tar.xz" | sha256sum --check
-tar -xJf "$work/kernel.tar.xz" -C "$work"
+curl --fail --location --retry 3 "$url" -o "$work/kernel.tar"
+[ -z "$checksum" ] || printf '%s  %s\n' "$checksum" "$work/kernel.tar" | sha256sum --check
+tar -xf "$work/kernel.tar" -C "$work"
 cd "$work/linux-$version"
 make x86_64_defconfig
 scripts/config --disable DEBUG_INFO --disable DEBUG_INFO_BTF --disable SECURITY_SELINUX \
